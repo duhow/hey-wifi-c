@@ -8,7 +8,6 @@
 
 #define PCM_DEVICE "default"
 #define PROFILE_FILE "quiet-profiles.json"
-#define SAMPLE_RATE 44100
 #define MESSAGE_SIZE 1024
 
 typedef unsigned char tinyint;
@@ -20,16 +19,17 @@ char pcm_name[32] = PCM_DEVICE;
 char config_file[255] = PROFILE_FILE;
 char exec_file[255] = "";
 
-static snd_pcm_t *handle;
-static snd_pcm_info_t *params;
-static snd_pcm_uframes_t chunk_size = 0;
-static u_char *audiobuf = NULL;
-static quiet_decoder *decoder;
+snd_pcm_t *handle;
+snd_pcm_hw_params_t *params;
+snd_pcm_uframes_t chunk_size = 0;
+snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
+unsigned short rate = 44100;
+tinyint channels = 2;
+char *audiobuf = NULL;
+quiet_decoder *decoder;
 uint8_t *writeBuffer;
 
 int prepare_alsa() {
-    snd_pcm_info_alloca(&params);
-
     log_debug("opening PCM handle %s", pcm_name);
     err = snd_pcm_open(&handle, pcm_name, SND_PCM_STREAM_CAPTURE, 0);
     if(err < 0){
@@ -37,33 +37,67 @@ int prepare_alsa() {
         return 1;
     }
 
-    log_debug("setting default info");
-    err = snd_pcm_info(handle, params);
+    log_debug("allocating parameter structure");
+    err = snd_pcm_hw_params_malloc(&params);
     if(err < 0){
-        log_error("info error: %s", snd_strerror(err));
+        log_error("error allocating: %s", snd_strerror(err));
         return 1;
     }
 
-    log_debug("setting PCM as nonblock");
-    err = snd_pcm_nonblock(handle, 1);
+    err = snd_pcm_hw_params_any(handle, params);
     if(err < 0){
-        log_error("nonblock setting error: %s", snd_strerror(err));
+        log_error("error initializing: %s", snd_strerror(err));
         return 1;
     }
 
-    if(snd_pcm_state(handle) == SND_PCM_STATE_PREPARED){
-        log_debug("starting PCM");
-        err = snd_pcm_start(handle);
-        if(err < 0){
-            log_error("failed to start PCM: %s", snd_strerror(err));
-            return 1;
-        }
+    log_debug("setting access type interleaved");
+    err = snd_pcm_hw_params_set_access(handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if(err < 0){
+        log_error("error with access type: %s", snd_strerror(err));
+        return 1;
     }
 
-    chunk_size = 1024;
+    log_debug("setting audio format");
+    err = snd_pcm_hw_params_set_format(handle, params, format);
+    if(err < 0){
+        log_error("error with format %d: %s", format, snd_strerror(err));
+        return 1;
+    }
 
-    log_debug("allocating memory");
-    audiobuf = (u_char *)malloc(chunk_size);
+    log_debug("setting audio sample rate to %d", rate);
+    err = snd_pcm_hw_params_set_rate_near(handle, params, &rate, 0);
+    if(err < 0){
+        log_error("error with sample rate: %s", snd_strerror(err));
+        return 1;
+    }
+
+    log_debug("setting channels to %d", channels);
+    err = snd_pcm_hw_params_set_channels(handle, params, channels);
+    if(err < 0){
+        log_error("error with channels: %s", snd_strerror(err));
+        return 1;
+    }
+
+    log_debug("setting hardware params");
+    err = snd_pcm_hw_params(handle, params);
+    if(err < 0){
+        log_error("error while setting params: %s", snd_strerror(err));
+        return 1;
+    }
+
+    snd_pcm_hw_params_free(params);
+
+    log_debug("preparing audio interface");
+    err = snd_pcm_prepare(handle);
+    if(err < 0){
+        log_error("error while preparing: %s", snd_strerror(err));
+        return 1;
+    }
+
+    chunk_size = (1024 * snd_pcm_format_width(format) / 8 * channels);
+
+    log_debug("allocating memory %d", chunk_size);
+    audiobuf = malloc(chunk_size);
     if(audiobuf == NULL){
         log_error("not enough memory");
         return 1;
@@ -76,10 +110,10 @@ int prepare_alsa() {
 int prepare_quiet() {
     log_debug("loading options from file: %s", config_file);
     quiet_decoder_options *decodeOpt =
-        quiet_decoder_profile_filename(config_file, "audible");
+        quiet_decoder_profile_filename(config_file, "wave");
 
     log_debug("creating a decoder");
-    decoder = quiet_decoder_create(decodeOpt, SAMPLE_RATE);
+    decoder = quiet_decoder_create(decodeOpt, rate);
 
     writeBuffer = malloc(MESSAGE_SIZE);
     if(writeBuffer == NULL){
@@ -95,7 +129,9 @@ int run() {
     if(err > 0){ return err; }
 
     err = prepare_quiet();
+    if(err > 0){ return err; }
 
+    err = 0;
     running = true;
     log_info("starting to listen");
     while(running){
@@ -103,6 +139,7 @@ int run() {
         err = snd_pcm_readi(handle, audiobuf, chunk_size);
         if(err < 0){
             log_error("ALSA error %d: %s", err, snd_strerror(err));
+            err = 1;
             running = false;
         }
         log_debug("consuming to decoder");
@@ -116,6 +153,7 @@ int run() {
         running = false;
     }
     quiet_decoder_destroy(decoder);
+    free(audiobuf);
 
     if(handle){
         log_debug("closing PCM handle");
@@ -125,7 +163,7 @@ int run() {
     }
 
     log_debug("finished run");
-    return 0;
+    return err;
 }
 
 void show_help(char *prog_name) {
