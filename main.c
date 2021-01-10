@@ -23,9 +23,10 @@ snd_pcm_t *handle;
 snd_pcm_hw_params_t *params;
 snd_pcm_uframes_t chunk_size = 0;
 unsigned int frame_size = 0;
-snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
-unsigned short rate = 44100;
-tinyint channels = 2;
+unsigned int buffer_size = 16384;
+snd_pcm_format_t format = SND_PCM_FORMAT_FLOAT_LE;
+unsigned int rate = 44100;
+tinyint channels = 1;
 char *audiobuf = NULL;
 quiet_decoder *decoder;
 uint8_t *writeBuffer;
@@ -95,8 +96,8 @@ int prepare_alsa() {
         return 1;
     }
 
-    chunk_size = (1024 * snd_pcm_format_width(format) / 8 * channels);
-    frame_size = (chunk_size / 4);
+    chunk_size = (buffer_size * snd_pcm_format_width(format) / 8 * channels);
+    frame_size = (chunk_size / snd_pcm_format_width(format));
 
     log_debug("allocating memory %d", chunk_size);
     audiobuf = malloc(chunk_size);
@@ -117,7 +118,7 @@ int prepare_quiet() {
     log_debug("creating a decoder");
     decoder = quiet_decoder_create(decodeOpt, rate);
 
-    writeBuffer = malloc(MESSAGE_SIZE);
+    writeBuffer = malloc(frame_size);
     if(writeBuffer == NULL){
         log_error("not enough memory");
         return 1;
@@ -144,11 +145,11 @@ int run() {
             err = 1;
             running = false;
         }
-        log_debug("consuming to decoder");
+        log_trace("consuming to decoder");
         quiet_decoder_consume(decoder, audiobuf, frame_size);
 
-        log_debug("checking if data received");
-        ssize_t read = quiet_decoder_recv(decoder, writeBuffer, MESSAGE_SIZE);
+        log_trace("checking if data received");
+        ssize_t read = quiet_decoder_recv(decoder, writeBuffer, frame_size);
         if(read < 0){ continue; }
 
         log_info("%.*s\n", read, writeBuffer);
@@ -169,7 +170,15 @@ int run() {
 }
 
 void show_help(char *prog_name) {
-    printf("Usage: %s [-v] [-D default] [-f %s] [-x script.sh]\n",
+    printf(
+        "Usage: %s [OPTIONS]\n"
+        " -v         Activate verbose (debug) messages\n"
+        " -D pcm     Specify ALSA PCM capture device\n"
+        " -r 44100   Sample rate to use\n"
+        " -c 1       Audio channels from capture device\n"
+        " -B 16384   Buffer size to use\n"
+        " -f q.json  quiet-profile.json file\n"
+        " -x run.sh  Custom command or script to run\n",
           prog_name, PROFILE_FILE);
 }
 
@@ -180,24 +189,48 @@ int main(int argc, char *argv[]) {
     for(i = 1; i < argc; i++){
         if(strcmp("-v", argv[i]) == 0){
             verbose = true;
+            log_set_level(LOG_DEBUG);
+            continue;
+        } else if(strcmp("-vv", argv[i]) == 0){
+            verbose = true;
             log_set_level(LOG_TRACE);
             continue;
         } else if(strcmp("-h", argv[i]) == 0 || strcmp("--help", argv[i]) == 0){
             show_help(argv[0]);
             exit(0);
+        } else if(strcmp("-r", argv[i]) == 0){
+            if(argc <= ++i){
+                log_error("Specify the sample rate to use.");
+                exit(1);
+            }
+            rate = atoi(argv[i]);
+            continue;
+        } else if(strcmp("-c", argv[i]) == 0){
+            if(argc <= ++i){
+                log_error("Specify the channels to use.");
+                exit(1);
+            }
+            channels = atoi(argv[i]);
+            continue;
+        } else if(strcmp("-B", argv[i]) == 0){
+            if(argc <= ++i){
+                log_error("Specify the frame buffer size to use.");
+                exit(1);
+            }
+            buffer_size = atoi(argv[i]);
+            continue;
         } else if(strcmp("-D", argv[i]) == 0){
-            if(argc <= i+1){
+            if(argc <= ++i){
                 log_error("Specify the PCM record device.");
                 exit(1);
             }
-            strcpy(pcm_name, argv[++i]);
+            strcpy(pcm_name, argv[i]);
             continue;
         } else if(strcmp("-f", argv[i]) == 0){
-            if(argc <= i+1){
+            if(argc <= ++i){
                 log_error("Specify the config file to use.");
                 exit(1);
             }
-            i++; // skip to file name arg
             if(access(argv[i], F_OK|R_OK) != 0){
                 log_error("Config file does not exist or is not readable");
                 exit(1);
@@ -205,7 +238,7 @@ int main(int argc, char *argv[]) {
             strcpy(config_file, argv[i]);
             continue;
         } else if(strcmp("-x", argv[i]) == 0){
-            if(argc <= i+1){
+            if(argc <= ++i){
                 log_error("Specify the executable script or program to use.");
                 exit(1);
             }
@@ -215,18 +248,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // setting default config
-    if(pcm_name == NULL){
-        strcpy(pcm_name, PCM_DEVICE);
-    }
-    if(config_file == NULL){
-        strcpy(config_file, PROFILE_FILE);
-    }
-
-    printf("verbose: %d\n", verbose);
-    printf("device: %s\n", pcm_name);
-    printf("config: %s\n", config_file);
-
+    log_info("Using [%s] > %d:%d with %d frames - config: %s", pcm_name, rate, channels, buffer_size, config_file);
     log_debug("starting program");
     return run();
 }
