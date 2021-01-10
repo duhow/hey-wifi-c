@@ -22,6 +22,7 @@ char exec_file[255] = "";
 snd_pcm_t *handle;
 snd_pcm_hw_params_t *params;
 snd_pcm_uframes_t chunk_size = 0;
+unsigned int frame_size = 0;
 snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 unsigned short rate = 44100;
 tinyint channels = 2;
@@ -95,6 +96,7 @@ int prepare_alsa() {
     }
 
     chunk_size = (1024 * snd_pcm_format_width(format) / 8 * channels);
+    frame_size = (chunk_size / 4);
 
     log_debug("allocating memory %d", chunk_size);
     audiobuf = malloc(chunk_size);
@@ -110,7 +112,7 @@ int prepare_alsa() {
 int prepare_quiet() {
     log_debug("loading options from file: %s", config_file);
     quiet_decoder_options *decodeOpt =
-        quiet_decoder_profile_filename(config_file, "wave");
+        quiet_decoder_profile_filename(config_file, "audible");
 
     log_debug("creating a decoder");
     decoder = quiet_decoder_create(decodeOpt, rate);
@@ -136,14 +138,14 @@ int run() {
     log_info("starting to listen");
     while(running){
         log_debug("reading data");
-        err = snd_pcm_readi(handle, audiobuf, chunk_size);
+        err = snd_pcm_readi(handle, audiobuf, frame_size);
         if(err < 0){
             log_error("ALSA error %d: %s", err, snd_strerror(err));
             err = 1;
             running = false;
         }
         log_debug("consuming to decoder");
-        quiet_decoder_consume(decoder, audiobuf, chunk_size);
+        quiet_decoder_consume(decoder, audiobuf, frame_size);
 
         log_debug("checking if data received");
         ssize_t read = quiet_decoder_recv(decoder, writeBuffer, MESSAGE_SIZE);
