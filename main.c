@@ -9,10 +9,12 @@
 #define PCM_DEVICE "default"
 #define PROFILE_FILE "quiet-profiles.json"
 #define SAMPLE_RATE 44100
+#define MESSAGE_SIZE 1024
 
 typedef unsigned char tinyint;
 
 bool verbose = false;
+bool running = false;
 int err = 0;
 char pcm_name[32] = PCM_DEVICE;
 char config_file[255] = PROFILE_FILE;
@@ -22,12 +24,14 @@ static snd_pcm_t *handle;
 static snd_pcm_info_t *params;
 static snd_pcm_uframes_t chunk_size = 0;
 static u_char *audiobuf = NULL;
+static quiet_decoder *decoder;
+uint8_t *writeBuffer;
 
 int prepare_alsa() {
     snd_pcm_info_alloca(&params);
 
     log_debug("opening PCM handle %s", pcm_name);
-    err = snd_pcm_open(&handle, pcm_name, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+    err = snd_pcm_open(&handle, pcm_name, SND_PCM_STREAM_CAPTURE, 0);
     if(err < 0){
         log_error("audio open error: %s", snd_strerror(err));
         return 1;
@@ -75,7 +79,13 @@ int prepare_quiet() {
         quiet_decoder_profile_filename(config_file, "audible");
 
     log_debug("creating a decoder");
-    quiet_decoder *decoder = quiet_decoder_create(decodeOpt, SAMPLE_RATE);
+    decoder = quiet_decoder_create(decodeOpt, SAMPLE_RATE);
+
+    writeBuffer = malloc(MESSAGE_SIZE);
+    if(writeBuffer == NULL){
+        log_error("not enough memory");
+        return 1;
+    }
 
     return 0;
 }
@@ -85,6 +95,27 @@ int run() {
     if(err > 0){ return err; }
 
     err = prepare_quiet();
+
+    running = true;
+    log_info("starting to listen");
+    while(running){
+        log_debug("reading data");
+        err = snd_pcm_readi(handle, audiobuf, chunk_size);
+        if(err < 0){
+            log_error("ALSA error %d: %s", err, snd_strerror(err));
+            running = false;
+        }
+        log_debug("consuming to decoder");
+        quiet_decoder_consume(decoder, audiobuf, chunk_size);
+
+        log_debug("checking if data received");
+        ssize_t read = quiet_decoder_recv(decoder, writeBuffer, MESSAGE_SIZE);
+        if(read < 0){ continue; }
+
+        log_info("%.*s\n", read, writeBuffer);
+        running = false;
+    }
+    quiet_decoder_destroy(decoder);
 
     if(handle){
         log_debug("closing PCM handle");
