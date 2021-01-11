@@ -5,8 +5,6 @@
 #include <alsa/asoundlib.h>
 #include <quiet.h>
 
-#define PCM_DEVICE "default"
-#define PROFILE_FILE "quiet-profiles.json"
 #define MESSAGE_SIZE 255
 
 typedef unsigned char BYTE;
@@ -14,8 +12,9 @@ typedef unsigned char BYTE;
 bool verbose = false;
 bool listening = false;
 int err = 0;
-char pcm_name[32] = PCM_DEVICE;
-char config_file[255] = PROFILE_FILE;
+char pcm_name[32] = "default";
+char config_file[255] = "quiet-profiles.json";
+char profile[32] = "wave";
 char exec_file[255] = "";
 char *ssid, *password;
 
@@ -111,14 +110,14 @@ int prepare_alsa() {
 }
 
 int prepare_quiet() {
-    log_debug("loading options from file: %s", config_file);
+    log_debug("loading profile %s from file: %s", profile, config_file);
     quiet_decoder_options *decodeOpt =
-        quiet_decoder_profile_filename(config_file, "wave");
+        quiet_decoder_profile_filename(config_file, profile);
 
     log_debug("creating a decoder");
     decoder = quiet_decoder_create(decodeOpt, rate);
 
-    writeBuffer = malloc(frame_size);
+    writeBuffer = malloc(MESSAGE_SIZE);
     if(writeBuffer == NULL){
         log_error("not enough memory");
         return 1;
@@ -204,14 +203,19 @@ int run() {
 void show_help(char *prog_name) {
     printf(
         "Usage: %s [OPTIONS]\n"
-        " -v         Activate verbose (debug) messages\n"
-        " -D pcm     Specify ALSA PCM capture device\n"
-        " -r 44100   Sample rate to use\n"
-        " -c 1       Audio channels from capture device\n"
-        " -B 16384   Buffer size to use\n"
-        " -f q.json  quiet-profile.json file\n"
-        " -x run.sh  Custom command or script to run\n",
-          prog_name, PROFILE_FILE);
+        "Listen for Quiet encoded message, decode and setup Wireless access.\n"
+        "This is a fork of the original Hey Wifi project based in Python.\n"
+        "Use https://hey.voicen.io/ to send the WiFi credentials.\n"
+        "\n"
+        "  -v         Activate verbose (debug) messages\n"
+        "  -D %s Specify ALSA PCM capture device\n"
+        "  -r %d   Sample rate to use\n"
+        "  -c %d       Audio channels from capture device\n"
+        "  -B %d   Buffer size to use\n"
+        "  -f q.json  %s file\n"
+        "  -p %s    Quiet profile to use\n"
+        "  -x run.sh  Custom command or script to run\n",
+          prog_name, pcm_name, rate, channels, buffer_size, config_file, profile);
 }
 
 int main(int argc, char *argv[]) {
@@ -269,6 +273,13 @@ int main(int argc, char *argv[]) {
             }
             strcpy(config_file, argv[i]);
             continue;
+        } else if(strcmp("-p", argv[i]) == 0){
+            if(argc <= ++i){
+                log_error("Specify the quiet profile to use.");
+                exit(1);
+            }
+            strcpy(profile, argv[i]);
+            continue;
         } else if(strcmp("-x", argv[i]) == 0){
             if(argc <= ++i){
                 log_error("Specify the executable script or program to use.");
@@ -280,8 +291,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    log_info("Using [%s] > %d:%d with %d frames, config %s",
-             pcm_name, rate, channels, buffer_size, config_file);
+    log_info("Using [%s] > %d:%d with %d frames, config %s:%s",
+             pcm_name, rate, channels, buffer_size, config_file, profile);
     log_debug("starting program");
     return run();
 }
