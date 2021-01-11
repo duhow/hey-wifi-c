@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 
 #include "log.h"
@@ -8,16 +7,17 @@
 
 #define PCM_DEVICE "default"
 #define PROFILE_FILE "quiet-profiles.json"
-#define MESSAGE_SIZE 1024
+#define MESSAGE_SIZE 255
 
-typedef unsigned char tinyint;
+typedef unsigned char BYTE;
 
 bool verbose = false;
-bool running = false;
+bool listening = false;
 int err = 0;
 char pcm_name[32] = PCM_DEVICE;
 char config_file[255] = PROFILE_FILE;
 char exec_file[255] = "";
+char *ssid, *password;
 
 snd_pcm_t *handle;
 snd_pcm_hw_params_t *params;
@@ -26,7 +26,7 @@ unsigned int frame_size = 0;
 unsigned int buffer_size = 16384;
 snd_pcm_format_t format = SND_PCM_FORMAT_FLOAT_LE;
 unsigned int rate = 44100;
-tinyint channels = 1;
+BYTE channels = 1;
 char *audiobuf = NULL;
 quiet_decoder *decoder;
 uint8_t *writeBuffer;
@@ -113,7 +113,7 @@ int prepare_alsa() {
 int prepare_quiet() {
     log_debug("loading options from file: %s", config_file);
     quiet_decoder_options *decodeOpt =
-        quiet_decoder_profile_filename(config_file, "audible");
+        quiet_decoder_profile_filename(config_file, "wave");
 
     log_debug("creating a decoder");
     decoder = quiet_decoder_create(decodeOpt, rate);
@@ -127,6 +127,35 @@ int prepare_quiet() {
     return 0;
 }
 
+int extract_data() {
+    BYTE msize1, msize2, x;
+
+    msize1 = writeBuffer[0];
+    log_debug("SSID has size %d", msize1);
+
+    ssid = malloc(msize1 + 1);
+    for(x = 0; x < msize1; x++){ ssid[x] = writeBuffer[1+x]; }
+    ssid[msize1] = '\0';
+
+    log_info("SSID: %s", ssid);
+
+    // ------
+
+    msize2 = writeBuffer[msize1 + 1];
+    log_debug("Password has size %d", msize2);
+
+    password = malloc(msize2 + 1);
+    for(x = 0; x < msize2; x++){ password[x] = writeBuffer[msize1+1 + 1+x]; }
+    password[msize2] = '\0';
+
+    log_debug("Password: %s", password);
+
+    //x = 1 + msize1 + 1 + msize2;
+    //log_debug("Check is %d %d", writeBuffer[x], writeBuffer[x+1]);
+
+    return 0;
+}
+
 int run() {
     err = prepare_alsa();
     if(err > 0){ return err; }
@@ -135,32 +164,35 @@ int run() {
     if(err > 0){ return err; }
 
     err = 0;
-    running = true;
-    log_info("starting to listen");
-    while(running){
+    listening = true;
+    log_info("listening");
+    while(listening){
         log_debug("reading data");
         err = snd_pcm_readi(handle, audiobuf, frame_size);
         if(err < 0){
             log_error("ALSA error %d: %s", err, snd_strerror(err));
             err = 1;
-            running = false;
+            break;
         }
         log_trace("consuming to decoder");
         quiet_decoder_consume(decoder, audiobuf, frame_size);
 
         log_trace("checking if data received");
-        ssize_t read = quiet_decoder_recv(decoder, writeBuffer, frame_size);
+        ssize_t read = quiet_decoder_recv(decoder, writeBuffer, MESSAGE_SIZE);
         if(read < 0){ continue; }
 
-        log_info("%.*s\n", read, writeBuffer);
-        running = false;
+        log_trace("%.*s\n", read, writeBuffer);
+
+        err = extract_data();
+        if(err > 0){ continue; }
+
+        listening = false;
     }
     quiet_decoder_destroy(decoder);
     free(audiobuf);
 
     if(handle){
         log_debug("closing PCM handle");
-        snd_pcm_drain(handle);
         snd_pcm_close(handle);
         handle = NULL;
     }
@@ -183,7 +215,7 @@ void show_help(char *prog_name) {
 }
 
 int main(int argc, char *argv[]) {
-    tinyint i;
+    BYTE i;
     log_set_level(LOG_INFO);
 
     for(i = 1; i < argc; i++){
@@ -248,7 +280,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    log_info("Using [%s] > %d:%d with %d frames - config: %s", pcm_name, rate, channels, buffer_size, config_file);
+    log_info("Using [%s] > %d:%d with %d frames, config %s",
+             pcm_name, rate, channels, buffer_size, config_file);
     log_debug("starting program");
     return run();
 }
