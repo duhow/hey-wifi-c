@@ -15,7 +15,7 @@ int err = 0;
 char pcm_name[32] = "default";
 char config_file[255] = "quiet-profiles.json";
 char profile[32] = "wave";
-char exec_file[255] = "";
+char exec_file[128] = "";
 char *ssid, *password;
 
 snd_pcm_t *handle;
@@ -109,6 +109,16 @@ int prepare_alsa() {
     return 0;
 }
 
+void close_alsa() {
+    free(audiobuf);
+
+    if(handle){
+        log_debug("closing PCM handle");
+        snd_pcm_close(handle);
+        handle = NULL;
+    }
+}
+
 int prepare_quiet() {
     log_debug("loading profile %s from file: %s", profile, config_file);
     quiet_decoder_options *decodeOpt =
@@ -164,7 +174,7 @@ int run() {
 
     err = 0;
     listening = true;
-    log_info("listening");
+    log_info("Listening");
     while(listening){
         log_debug("reading data");
         err = snd_pcm_readi(handle, audiobuf, frame_size);
@@ -188,15 +198,38 @@ int run() {
         listening = false;
     }
     quiet_decoder_destroy(decoder);
-    free(audiobuf);
+    close_alsa();
 
-    if(handle){
-        log_debug("closing PCM handle");
-        snd_pcm_close(handle);
-        handle = NULL;
+    if(ssid){
+        char command[255];
+        if(exec_file[0]){
+            sprintf(command, "%s %s %s", exec_file, ssid, password);
+
+            log_info("Running external program");
+            err = system(command);
+            if(err != 0){
+                log_error("Program exited with error %d", err);
+            }
+        }else{
+            log_info("Running nmcli to configure network");
+            system("nmcli device wifi rescan");
+
+            sprintf(command, "nmcli connection delete \"%s\"", ssid);
+            log_debug(command);
+            system(command);
+
+            sprintf(command, "nmcli device wifi connect \"%s\" password \"%s\"", ssid, password);
+            log_debug(command);
+            err = system(command);
+            if(err != 0){
+                log_error("Failed to connect!");
+            }else{
+                log_info("Connected!");
+            }
+        }
     }
 
-    log_debug("finished run");
+    log_debug("Finished run");
     return err;
 }
 
@@ -214,7 +247,8 @@ void show_help(char *prog_name) {
         "  -B %d   Buffer size to use\n"
         "  -f q.json  %s file\n"
         "  -p %s    Quiet profile to use\n"
-        "  -x run.sh  Custom command or script to run\n",
+        "  -x run.sh  Custom command or script to run\n"
+        "             (run.sh SSID PASSWORD)\n",
           prog_name, pcm_name, rate, channels, buffer_size, config_file, profile);
 }
 
@@ -285,8 +319,17 @@ int main(int argc, char *argv[]) {
                 log_error("Specify the executable script or program to use.");
                 exit(1);
             }
+            strcpy(exec_file, argv[i]);
+            continue;
         } else {
             log_error("Parameter %s not recognized.", argv[i]);
+            exit(1);
+        }
+    }
+    if(!exec_file[0]){
+        err = system("which nmcli 2>/dev/null");
+        if(err != 0){
+            log_error("nmcli not found, please specify an executable script or program.");
             exit(1);
         }
     }
